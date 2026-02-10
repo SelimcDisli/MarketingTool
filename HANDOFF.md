@@ -1,50 +1,43 @@
 # HANDOFF — Sync Context between Claude Code & Antigravity
 
 ## Last Editor: Claude Code (Opus)
-## Timestamp: 2026-02-10T14:30:00Z
-## Current Phase: Phase 2 COMPLETE — Ready for Phase 3+
+## Timestamp: 2026-02-11T10:00:00Z
+## Current Phase: Phase 5 COMPLETE — Backend fully functional, ready for Frontend
 
 ## What was just completed:
 - Full project structure created
-- Complete Prisma schema with ALL 20+ tables (Users, Workspaces, EmailAccounts, Campaigns, CampaignSteps, StepVariants, Leads, LeadLists, SentEmails, WarmupEmails, UniboxThreads, UniboxMessages, CRM Pipelines/Stages/Deals, Templates, Webhooks, Analytics, Blocklist, ApiKeys)
+- Complete Prisma schema with ALL 20+ tables
 - Express + TypeScript backend with all middleware (auth, error handling, rate limiting)
 - JWT auth + API key auth + workspace-scoped RBAC
-- ALL route files implemented:
-  - `/api/auth` — Register, Login, Get Me
-  - `/api/accounts` — Full CRUD, SMTP test, DNS check, warmup toggle, bulk import
-  - `/api/campaigns` — Full CRUD, start/pause, steps, A/Z variants, lead assignment, analytics
-  - `/api/leads` — Full CRUD, CSV upload with auto-mapping, verification, lead lists, blocklist
-  - `/api/unibox` — Thread list/detail, reply, tag, notes, bulk ops, stats
-  - `/api/analytics` — Overview, daily stats, account performance
-  - `/api/crm` — Pipelines, stages, deals (full CRUD)
-  - `/api/webhooks` — CRUD, test delivery
-  - `/api/templates` — CRUD with search
-  - `/api/workspace` — Settings, members (invite/update/remove)
-  - `/t/open/:id` — Open tracking pixel
-  - `/t/click/:id` — Click tracking redirect
-  - `/t/unsubscribe/:id` — Unsubscribe handler
-- ALL workers implemented:
-  - Email Sender Worker (BullMQ, inbox rotation, slow ramp, A/Z testing, bounce handling, auto-pause)
-  - Warmup Worker (slow ramp, partner pool, read emulation, spam-to-inbox, reply generation)
-  - Reply Processor Worker (IMAP polling, AI classification, OOO detection, auto-unsubscribe)
-  - Webhook Delivery Worker (HMAC signing, retry with exponential backoff, auto-disable)
+- ALL route files implemented (auth, accounts, campaigns, leads, unibox, analytics, crm, webhooks, templates, workspace, tracking)
+- ALL workers implemented (emailSender, warmup, replyProcessor, webhookDelivery)
 - Utility modules: Spintax parser, DNS checker, encryption, HMAC
 - TypeScript compiles with zero errors
-- npm dependencies installed
+- **Supabase connected** — 24 tables + 14 enums created via raw SQL migration
+- **Upstash Redis connected** — BullMQ queues initialized (graceful fallback if unavailable)
+- **Server tested** — Register, Login, Me, Analytics, Campaign CRUD all working on port 3001
+- **Pushed to GitHub** — https://github.com/SelimcDisli/MarketingTool.git
+
+## Infrastructure Details:
+- **Supabase**: Project `fbzfamgutqzfoqbgersa` on `aws-1-us-east-1` (NOT eu-central-1!)
+- **Connection**: Must use pooler URL (IPv6-only project), Transaction Mode port 6543
+- **Prisma**: Interactive transactions need 30s timeout due to pooler latency
+- **Redis**: Upstash at `prompt-eel-52736.upstash.io`, TLS on port 6379
+- **Migration**: `prisma db push` doesn't work through pgbouncer Transaction Mode — use `prisma/migration.sql` directly
 
 ## What needs to be done next:
-1. **Set up Supabase** — Create project, get DATABASE_URL, run `prisma db push`
-2. **Set up Redis** — Upstash or local Redis, get REDIS_URL
-3. **Create .env** — Copy .env.example, fill in credentials
-4. **Test API** — Start server with `npm run dev`, test endpoints with curl/Postman
-5. **Frontend (Lovable)** — Build all pages (see PLAN.md for page list)
-6. **Deploy** — Railway/Render for backend, Lovable for frontend
+1. **Frontend (Lovable)** — Use prompt in `docs/LOVABLE_PROMPT.md` to build all 11 pages
+2. **Test remaining endpoints** — accounts, leads CSV upload, CRM, webhooks, templates, workspace
+3. **Production deployment** — Railway/Render for backend
+4. **Domain setup** — Custom tracking domain for open/click tracking
 
-## Open Issues / Blockers:
-- Need Supabase project URL + service key for DATABASE_URL
-- Need Redis/Upstash connection string for REDIS_URL
-- Need OpenAI API key for AI features (optional, keyword fallback works)
-- Need to run `npx prisma db push` once DB is configured
+## API Endpoints Tested & Working:
+- POST /api/auth/register ✅
+- POST /api/auth/login ✅
+- GET /api/auth/me ✅
+- GET /api/analytics/overview ✅
+- POST /api/campaigns ✅
+- GET /api/campaigns ✅
 
 ## Architecture Decisions Made:
 - Prisma ORM with PostgreSQL (Supabase)
@@ -62,40 +55,42 @@
 ## File Structure:
 ```
 backend/
-├── prisma/schema.prisma          # Full DB schema (20+ models)
+├── prisma/
+│   ├── schema.prisma          # Full DB schema (20+ models)
+│   └── migration.sql          # Raw SQL migration (use this instead of prisma db push)
 ├── src/
-│   ├── index.ts                  # Express server entry point
+│   ├── index.ts               # Express server entry point
 │   ├── config/
-│   │   ├── index.ts              # Environment config
-│   │   ├── prisma.ts             # Prisma client
-│   │   ├── redis.ts              # Redis connection
-│   │   └── queue.ts              # BullMQ queues
+│   │   ├── index.ts           # Environment config
+│   │   ├── prisma.ts          # Prisma client (30s transaction timeout)
+│   │   ├── redis.ts           # Redis connection (graceful fallback)
+│   │   └── queue.ts           # BullMQ queues (safeQueueAdd helper)
 │   ├── middleware/
-│   │   ├── auth.ts               # JWT + API key auth, RBAC
-│   │   └── errorHandler.ts       # Global error handler
+│   │   ├── auth.ts            # JWT + API key auth, RBAC
+│   │   └── errorHandler.ts    # Global error handler
 │   ├── routes/
-│   │   ├── auth.ts               # Register, login, me
-│   │   ├── accounts.ts           # Email account management
-│   │   ├── campaigns.ts          # Campaign CRUD + steps + variants
-│   │   ├── leads.ts              # Lead management + CSV upload + blocklist
-│   │   ├── unibox.ts             # Unified inbox
-│   │   ├── analytics.ts          # Dashboard + daily + account stats
-│   │   ├── crm.ts                # Pipeline + deals
-│   │   ├── webhooks.ts           # Webhook management + dispatcher
-│   │   ├── templates.ts          # Email templates
-│   │   ├── workspace.ts          # Workspace + team management
-│   │   └── tracking.ts           # Open pixel + click redirect + unsubscribe
+│   │   ├── auth.ts            # Register, login, me
+│   │   ├── accounts.ts        # Email account management
+│   │   ├── campaigns.ts       # Campaign CRUD + steps + variants
+│   │   ├── leads.ts           # Lead management + CSV upload + blocklist
+│   │   ├── unibox.ts          # Unified inbox
+│   │   ├── analytics.ts       # Dashboard + daily + account stats
+│   │   ├── crm.ts             # Pipeline + deals
+│   │   ├── webhooks.ts        # Webhook management + dispatcher
+│   │   ├── templates.ts       # Email templates
+│   │   ├── workspace.ts       # Workspace + team management
+│   │   └── tracking.ts        # Open pixel + click redirect + unsubscribe
 │   ├── workers/
-│   │   ├── emailSender.ts        # Campaign email sending
-│   │   ├── warmup.ts             # Email warmup
-│   │   ├── replyProcessor.ts     # IMAP reply polling + AI classification
-│   │   └── webhookDelivery.ts    # Webhook delivery with retry
+│   │   ├── emailSender.ts     # Campaign email sending
+│   │   ├── warmup.ts          # Email warmup
+│   │   ├── replyProcessor.ts  # IMAP reply polling + AI classification
+│   │   └── webhookDelivery.ts # Webhook delivery with retry
 │   ├── utils/
-│   │   ├── spintax.ts            # Spintax + merge tag parser
-│   │   ├── dns.ts                # SPF/DKIM/DMARC/MX checker
-│   │   └── crypto.ts             # AES encryption + HMAC
+│   │   ├── spintax.ts         # Spintax + merge tag parser
+│   │   ├── dns.ts             # SPF/DKIM/DMARC/MX checker
+│   │   └── crypto.ts          # AES encryption + HMAC
 │   └── types/
-│       └── express.d.ts          # Express type augmentation
+│       └── express.d.ts       # Express type augmentation
 ├── package.json
 ├── tsconfig.json
 └── .env.example
@@ -103,17 +98,22 @@ backend/
 
 ## How to Start:
 ```bash
-# 1. Copy env
+# 1. Install deps
+cd backend && npm install
+
+# 2. Copy env and fill credentials
 cp .env.example .env
-# 2. Fill in DATABASE_URL, REDIS_URL, JWT_SECRET
 
-# 3. Push schema to DB
-npx prisma db push
+# 3. Create tables (use raw SQL, NOT prisma db push)
+# Execute prisma/migration.sql against your Supabase
 
-# 4. Start dev server
-npm run dev
+# 4. Generate Prisma client
+npx prisma generate
 
-# 5. Start workers (separate terminals)
+# 5. Start dev server
+npm run dev    # Server on port 3001
+
+# 6. Start workers (separate terminals, requires Redis)
 npm run worker:email
 npm run worker:warmup
 npm run worker:reply

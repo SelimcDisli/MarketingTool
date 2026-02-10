@@ -27,15 +27,16 @@
 - [x] Webhook System (CRUD, HMAC signing, retry, auto-disable)
 - [x] Template library
 
-## Phase 5: Infrastructure Setup ← NEXT
-- [ ] Set up Supabase (DATABASE_URL)
-- [ ] Set up Redis (Upstash REDIS_URL)
-- [ ] Create .env with all credentials
-- [ ] Run `prisma db push` to create tables
-- [ ] Test server starts with `npm run dev`
-- [ ] Test basic API endpoints (register, login, create workspace)
+## Phase 5: Infrastructure ✅
+- [x] Set up Supabase (24 tables + 14 enums created)
+- [x] Set up Redis (Upstash, graceful fallback)
+- [x] Create .env with all credentials
+- [x] Run migration (raw SQL via pg client)
+- [x] Test server starts (port 3001)
+- [x] Test API endpoints (register, login, me, campaigns, analytics)
+- [x] Push to GitHub
 
-## Phase 6: Frontend (Lovable) ← AFTER INFRASTRUCTURE
+## Phase 6: Frontend (Lovable) ← CURRENT
 - [ ] Dashboard page (overview stats, charts)
 - [ ] Campaign builder + sequence editor
 - [ ] Email accounts page (connect, warmup toggle, DNS status)
@@ -46,8 +47,11 @@
 - [ ] Settings + team management
 - [ ] Template library
 - [ ] Onboarding flow
+- [ ] Auth pages (login + register)
 
 ## Phase 7: Testing & Deploy
+- [ ] Test remaining API endpoints (accounts, leads, CRM, webhooks)
 - [ ] End-to-end testing
 - [ ] Production deployment (Railway/Render)
+- [ ] Custom tracking domain setup
 - [ ] Monitoring setup
