@@ -3,7 +3,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import prisma from '../config/prisma';
 import { authenticate, requireWorkspace, AuthRequest } from '../middleware/auth';
-import { emailQueue } from '../config/queue';
+import { emailQueue, safeQueueAdd } from '../config/queue';
 import { AppError } from '../middleware/errorHandler';
 
 const router = Router();
@@ -225,8 +225,8 @@ router.post('/:id/start', async (req: AuthRequest, res: Response) => {
     });
   }
 
-  // Add to email queue
-  await emailQueue.add('process-campaign', {
+  // Add to email queue (only if Redis available)
+  await safeQueueAdd(emailQueue, 'process-campaign', {
     campaignId: campaign.id,
     workspaceId: req.workspaceId,
   }, {
@@ -253,10 +253,10 @@ router.post('/:id/pause', async (req: AuthRequest, res: Response) => {
 
   if (newStatus === 'PAUSED') {
     // Remove from queue
-    await emailQueue.removeRepeatableByKey(`campaign-${campaign.id}`).catch(() => {});
+    if (emailQueue) await emailQueue.removeRepeatableByKey(`campaign-${campaign.id}`).catch(() => {});
   } else {
     // Re-add to queue
-    await emailQueue.add('process-campaign', {
+    await safeQueueAdd(emailQueue, 'process-campaign', {
       campaignId: campaign.id,
       workspaceId: req.workspaceId,
     }, {

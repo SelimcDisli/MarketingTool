@@ -33,54 +33,53 @@ router.post('/register', async (req: Request, res: Response) => {
 
     const passwordHash = await bcrypt.hash(data.password, 12);
 
-    const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: {
-          email: data.email,
-          passwordHash,
-          firstName: data.firstName,
-          lastName: data.lastName,
-        },
-      });
-
-      const workspace = await tx.workspace.create({
-        data: {
-          name: data.workspaceName,
-          slug: data.workspaceName.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now(),
-          members: {
-            create: {
-              userId: user.id,
-              role: 'OWNER',
-              joinedAt: new Date(),
-            },
-          },
-        },
-      });
-
-      // Create default CRM pipeline
-      const pipeline = await tx.crmPipeline.create({
-        data: {
-          workspaceId: workspace.id,
-          name: 'Default Pipeline',
-          isDefault: true,
-          stages: {
-            createMany: {
-              data: [
-                { name: 'Lead', order: 0, color: '#94a3b8' },
-                { name: 'Contacted', order: 1, color: '#60a5fa' },
-                { name: 'Interested', order: 2, color: '#34d399' },
-                { name: 'Meeting Booked', order: 3, color: '#a78bfa' },
-                { name: 'Proposal Sent', order: 4, color: '#fbbf24' },
-                { name: 'Closed Won', order: 5, color: '#22c55e' },
-                { name: 'Closed Lost', order: 6, color: '#ef4444' },
-              ],
-            },
-          },
-        },
-      });
-
-      return { user, workspace };
+    // Create user + workspace
+    const user = await prisma.user.create({
+      data: {
+        email: data.email,
+        passwordHash,
+        firstName: data.firstName,
+        lastName: data.lastName,
+      },
     });
+
+    const workspace = await prisma.workspace.create({
+      data: {
+        name: data.workspaceName,
+        slug: data.workspaceName.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now(),
+        members: {
+          create: {
+            userId: user.id,
+            role: 'OWNER',
+            joinedAt: new Date(),
+          },
+        },
+      },
+    });
+
+    // Create default CRM pipeline (non-blocking)
+    prisma.crmPipeline.create({
+      data: {
+        workspaceId: workspace.id,
+        name: 'Default Pipeline',
+        isDefault: true,
+        stages: {
+          createMany: {
+            data: [
+              { name: 'Lead', order: 0, color: '#94a3b8' },
+              { name: 'Contacted', order: 1, color: '#60a5fa' },
+              { name: 'Interested', order: 2, color: '#34d399' },
+              { name: 'Meeting Booked', order: 3, color: '#a78bfa' },
+              { name: 'Proposal Sent', order: 4, color: '#fbbf24' },
+              { name: 'Closed Won', order: 5, color: '#22c55e' },
+              { name: 'Closed Lost', order: 6, color: '#ef4444' },
+            ],
+          },
+        },
+      },
+    }).catch(e => console.error('CRM pipeline creation error:', e.message));
+
+    const result = { user, workspace };
 
     const token = jwt.sign(
       { userId: result.user.id, email: result.user.email },
