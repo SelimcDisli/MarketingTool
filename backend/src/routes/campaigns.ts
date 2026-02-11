@@ -28,7 +28,7 @@ const createCampaignSchema = z.object({
 });
 
 const addStepSchema = z.object({
-  order: z.number().min(0),
+  order: z.number().min(0).optional(),
   type: z.enum(['EMAIL', 'WAIT', 'CONDITION']).default('EMAIL'),
   subject: z.string().optional(),
   body: z.string().optional(),
@@ -203,9 +203,47 @@ router.post('/:id/start', async (req: AuthRequest, res: Response) => {
   });
 
   if (!campaign) throw new AppError('Campaign not found', 404);
-  if (campaign.steps.length === 0) throw new AppError('Campaign needs at least one step', 400);
-  if (campaign.accounts.length === 0) throw new AppError('Campaign needs at least one email account', 400);
-  if (campaign._count.campaignLeads === 0) throw new AppError('Campaign needs at least one lead', 400);
+
+  // Check steps exist
+  if (campaign.steps.length === 0) throw new AppError('Campaign needs at least one step with subject/body', 400);
+
+  // Auto-create variant A for steps that have subject+body but no variants
+  for (const step of campaign.steps) {
+    if (step.variants.length === 0 && step.subject && step.body) {
+      await prisma.stepVariant.create({
+        data: {
+          stepId: step.id,
+          variantLabel: 'A',
+          subject: step.subject,
+          body: step.body,
+        },
+      });
+      console.log(`[Campaign Start] Auto-created variant A for step ${step.order}`);
+    }
+  }
+
+  // Auto-assign all workspace email accounts if none assigned
+  if (campaign.accounts.length === 0) {
+    const workspaceAccounts = await prisma.emailAccount.findMany({
+      where: { workspaceId: req.workspaceId, isActive: true, smtpHost: { not: null }, smtpPass: { not: null } },
+      select: { id: true },
+    });
+
+    if (workspaceAccounts.length === 0) {
+      throw new AppError('No email accounts connected. Please connect an SMTP account first.', 400);
+    }
+
+    await prisma.campaignAccount.createMany({
+      data: workspaceAccounts.map((a) => ({
+        campaignId: campaign.id,
+        accountId: a.id,
+      })),
+      skipDuplicates: true,
+    });
+    console.log(`[Campaign Start] Auto-assigned ${workspaceAccounts.length} accounts`);
+  }
+
+  if (campaign._count.campaignLeads === 0) throw new AppError('Campaign needs at least one lead. Assign leads first.', 400);
 
   // Update status
   await prisma.campaign.update({
@@ -225,16 +263,20 @@ router.post('/:id/start', async (req: AuthRequest, res: Response) => {
     });
   }
 
-  // Add to email queue (only if Redis available)
+  // Add to email queue (if Redis available — DirectSender also handles this without Redis)
   await safeQueueAdd(emailQueue, 'process-campaign', {
     campaignId: campaign.id,
     workspaceId: req.workspaceId,
   }, {
-    repeat: { every: 60000 }, // Check every minute
+    repeat: { every: 60000 },
     jobId: `campaign-${campaign.id}`,
   });
 
-  return res.json({ message: 'Campaign started', status: 'ACTIVE' });
+  return res.json({
+    message: 'Campaign started! Emails will be sent within 60 seconds.',
+    status: 'ACTIVE',
+    leadsScheduled: pendingLeads.length,
+  });
 });
 
 // Pause campaign
@@ -253,7 +295,7 @@ router.post('/:id/pause', async (req: AuthRequest, res: Response) => {
 
   if (newStatus === 'PAUSED') {
     // Remove from queue
-    if (emailQueue) await emailQueue.removeRepeatableByKey(`campaign-${campaign.id}`).catch(() => {});
+    if (emailQueue) await emailQueue.removeRepeatableByKey(`campaign-${campaign.id}`).catch(() => { });
   } else {
     // Re-add to queue
     await safeQueueAdd(emailQueue, 'process-campaign', {
@@ -278,10 +320,20 @@ router.post('/:id/steps', async (req: AuthRequest, res: Response) => {
   const data = addStepSchema.parse(req.body);
 
   const step = await prisma.$transaction(async (tx) => {
+    let order = data.order;
+    if (order === undefined) {
+      const lastStep = await tx.campaignStep.findFirst({
+        where: { campaignId: campaign.id },
+        orderBy: { order: 'desc' },
+        select: { order: true },
+      });
+      order = (lastStep?.order ?? -1) + 1;
+    }
+
     const newStep = await tx.campaignStep.create({
       data: {
         campaignId: campaign.id,
-        order: data.order,
+        order: order!,
         type: data.type,
         subject: data.subject,
         body: data.body,

@@ -2,6 +2,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import nodemailer from 'nodemailer';
+import { ImapFlow } from 'imapflow';
 import prisma from '../config/prisma';
 import { authenticate, requireWorkspace, AuthRequest } from '../middleware/auth';
 import { encrypt, decrypt } from '../utils/crypto';
@@ -15,17 +16,17 @@ const connectAccountSchema = z.object({
   email: z.string().email(),
   displayName: z.string().optional(),
   provider: z.enum(['SMTP', 'GMAIL', 'OUTLOOK', 'SENDGRID', 'MAILGUN']).default('SMTP'),
-  smtpHost: z.string().optional(),
-  smtpPort: z.number().optional(),
-  smtpUser: z.string().optional(),
-  smtpPass: z.string().optional(),
-  smtpSecure: z.boolean().optional(),
+  smtpHost: z.string().min(1),
+  smtpPort: z.number().default(587),
+  smtpUser: z.string().min(1),
+  smtpPass: z.string().min(1),
+  smtpSecure: z.boolean().default(false),
   imapHost: z.string().optional(),
-  imapPort: z.number().optional(),
+  imapPort: z.number().default(993),
   imapUser: z.string().optional(),
   imapPass: z.string().optional(),
-  imapSecure: z.boolean().optional(),
-  dailySendLimit: z.number().min(1).max(100).optional(),
+  imapSecure: z.boolean().default(true),
+  dailySendLimit: z.number().min(1).max(500).default(30),
 });
 
 // List all accounts
@@ -37,6 +38,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       email: true,
       displayName: true,
       provider: true,
+      smtpHost: true,
+      smtpPort: true,
+      smtpUser: true,
+      smtpSecure: true,
+      imapHost: true,
+      imapPort: true,
+      imapUser: true,
+      imapSecure: true,
       spfValid: true,
       dkimValid: true,
       dmarcValid: true,
@@ -58,50 +67,92 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   return res.json({ accounts, total: accounts.length });
 });
 
-// Connect new account
+// Connect new account — validates SMTP and optionally IMAP
 router.post('/', async (req: AuthRequest, res: Response) => {
   const data = connectAccountSchema.parse(req.body);
+  const errors: string[] = [];
 
   // Test SMTP connection
-  if (data.smtpHost && data.smtpUser && data.smtpPass) {
+  console.log(`[Accounts] Testing SMTP: ${data.smtpHost}:${data.smtpPort} (user: ${data.smtpUser}, secure: ${data.smtpSecure})`);
+  try {
+    const transporter = nodemailer.createTransport({
+      host: data.smtpHost,
+      port: data.smtpPort,
+      secure: data.smtpSecure,
+      auth: {
+        user: data.smtpUser,
+        pass: data.smtpPass,
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+    await transporter.verify();
+    console.log(`[Accounts] SMTP verified for ${data.email}`);
+  } catch (error: any) {
+    console.error(`[Accounts] SMTP verification failed:`, error.message);
+    throw new AppError(`SMTP connection failed: ${error.message}`, 400);
+  }
+
+  // Test IMAP connection (if provided)
+  let imapOk = false;
+  if (data.imapHost && data.imapUser && data.imapPass) {
+    console.log(`[Accounts] Testing IMAP: ${data.imapHost}:${data.imapPort} (user: ${data.imapUser})`);
     try {
-      const transporter = nodemailer.createTransport({
-        host: data.smtpHost,
-        port: data.smtpPort || 587,
-        secure: data.smtpSecure ?? false,
+      const imapClient = new ImapFlow({
+        host: data.imapHost,
+        port: data.imapPort,
+        secure: data.imapSecure,
         auth: {
-          user: data.smtpUser,
-          pass: data.smtpPass,
+          user: data.imapUser,
+          pass: data.imapPass,
         },
-        connectionTimeout: 10000,
+        logger: false,
+        tls: {
+          rejectUnauthorized: false,
+        },
       });
-      await transporter.verify();
+      await imapClient.connect();
+      await imapClient.logout();
+      imapOk = true;
+      console.log(`[Accounts] IMAP verified for ${data.email}`);
     } catch (error: any) {
-      throw new AppError(`SMTP connection failed: ${error.message}`, 400);
+      console.error(`[Accounts] IMAP verification failed:`, error.message);
+      errors.push(`IMAP warning: ${error.message}`);
+      // Don't throw — IMAP is optional, SMTP is sufficient to send
     }
   }
 
   // Check DNS
   const domain = getDomainFromEmail(data.email);
-  const dnsResult = await checkDns(domain);
+  let dnsResult = { spfValid: false, dkimValid: false, dmarcValid: false };
+  try {
+    dnsResult = await checkDns(domain);
+  } catch (e) {
+    console.warn(`[Accounts] DNS check failed for ${domain}`);
+  }
 
+  // Save account
   const account = await prisma.emailAccount.create({
     data: {
       workspaceId: req.workspaceId!,
       email: data.email,
-      displayName: data.displayName,
+      displayName: data.displayName || data.email.split('@')[0],
       provider: data.provider,
       smtpHost: data.smtpHost,
       smtpPort: data.smtpPort,
       smtpUser: data.smtpUser,
-      smtpPass: data.smtpPass ? encrypt(data.smtpPass) : null,
+      smtpPass: encrypt(data.smtpPass),
       smtpSecure: data.smtpSecure,
-      imapHost: data.imapHost,
+      imapHost: data.imapHost || null,
       imapPort: data.imapPort,
-      imapUser: data.imapUser,
+      imapUser: data.imapUser || null,
       imapPass: data.imapPass ? encrypt(data.imapPass) : null,
       imapSecure: data.imapSecure,
-      dailySendLimit: data.dailySendLimit || 30,
+      dailySendLimit: data.dailySendLimit,
       spfValid: dnsResult.spfValid,
       dkimValid: dnsResult.dkimValid,
       dmarcValid: dnsResult.dmarcValid,
@@ -113,9 +164,103 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       id: account.id,
       email: account.email,
       provider: account.provider,
+      smtpVerified: true,
+      imapVerified: imapOk,
       dns: dnsResult,
     },
+    warnings: errors.length > 0 ? errors : undefined,
   });
+});
+
+// Test SMTP — send a test email
+router.post('/:id/test-send', async (req: AuthRequest, res: Response) => {
+  const account = await prisma.emailAccount.findFirst({
+    where: { id: req.params.id, workspaceId: req.workspaceId },
+  });
+  if (!account) throw new AppError('Account not found', 404);
+  if (!account.smtpHost || !account.smtpPass) throw new AppError('SMTP not configured', 400);
+
+  const { to, subject, body } = req.body;
+  if (!to) throw new AppError('Recipient email (to) is required', 400);
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: account.smtpHost,
+      port: account.smtpPort || 587,
+      secure: account.smtpSecure,
+      auth: {
+        user: account.smtpUser || account.email,
+        pass: decrypt(account.smtpPass),
+      },
+      tls: { rejectUnauthorized: false },
+    });
+
+    const info = await transporter.sendMail({
+      from: `${account.displayName || account.email} <${account.email}>`,
+      to,
+      subject: subject || 'Test Email from StreamLine',
+      text: body || 'This is a test email sent from your StreamLine cold email platform. If you received this, your SMTP settings are working correctly!',
+      html: body
+        ? body.replace(/\n/g, '<br>')
+        : '<p>This is a test email sent from your <b>StreamLine</b> cold email platform.</p><p>If you received this, your SMTP settings are working correctly!</p>',
+    });
+
+    // Update sentToday
+    await prisma.emailAccount.update({
+      where: { id: account.id },
+      data: { sentToday: { increment: 1 }, lastSentAt: new Date() },
+    });
+
+    return res.json({
+      success: true,
+      messageId: info.messageId,
+      accepted: info.accepted,
+      message: `Test email sent to ${to}`,
+    });
+  } catch (error: any) {
+    throw new AppError(`Failed to send test email: ${error.message}`, 500);
+  }
+});
+
+// Test IMAP — check inbox connection
+router.post('/:id/test-imap', async (req: AuthRequest, res: Response) => {
+  const account = await prisma.emailAccount.findFirst({
+    where: { id: req.params.id, workspaceId: req.workspaceId },
+  });
+  if (!account) throw new AppError('Account not found', 404);
+  if (!account.imapHost || !account.imapPass) throw new AppError('IMAP not configured', 400);
+
+  try {
+    const client = new ImapFlow({
+      host: account.imapHost,
+      port: account.imapPort || 993,
+      secure: account.imapSecure !== false,
+      auth: {
+        user: account.imapUser || account.email,
+        pass: decrypt(account.imapPass),
+      },
+      logger: false,
+      tls: { rejectUnauthorized: false },
+    });
+
+    await client.connect();
+
+    // Get mailbox status
+    const status = await client.status('INBOX', { messages: true, unseen: true });
+
+    await client.logout();
+
+    return res.json({
+      success: true,
+      inbox: {
+        totalMessages: status.messages,
+        unseenMessages: status.unseen,
+      },
+      message: `IMAP connection successful. Inbox has ${status.messages} messages (${status.unseen} unread).`,
+    });
+  } catch (error: any) {
+    throw new AppError(`IMAP connection failed: ${error.message}`, 500);
+  }
 });
 
 // Get account details
@@ -152,7 +297,9 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
   if (!account) throw new AppError('Account not found', 404);
 
   const updates: any = {};
-  const allowed = ['displayName', 'dailySendLimit', 'trackingDomain', 'isActive'];
+  const allowed = ['displayName', 'dailySendLimit', 'trackingDomain', 'isActive',
+    'smtpHost', 'smtpPort', 'smtpUser', 'smtpSecure',
+    'imapHost', 'imapPort', 'imapUser', 'imapSecure'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
   }
@@ -214,7 +361,6 @@ router.get('/:id/health', async (req: AuthRequest, res: Response) => {
   const domain = getDomainFromEmail(account.email);
   const dnsResult = await checkDns(domain);
 
-  // Update DNS status in DB
   await prisma.emailAccount.update({
     where: { id: account.id },
     data: {

@@ -1,4 +1,5 @@
 import express from 'express';
+import 'express-async-errors';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
@@ -74,6 +75,25 @@ app.listen(config.port, () => {
   📊 Health: http://localhost:${config.port}/health
   🔍 Track:  http://localhost:${config.port}/t
   `);
+
+  // Start Direct Sender (no Redis needed — works via setInterval)
+  try {
+    const { startDirectSender } = require('./workers/directSender');
+    startDirectSender();
+  } catch (err: any) {
+    console.warn('  ⚠️  Direct sender failed to start:', err.message);
+  }
+
+  // Start BullMQ workers (optional — only if Redis is available)
+  try {
+    require('./workers/emailSender');
+    require('./workers/warmup');
+    require('./workers/replyProcessor');
+    require('./workers/webhookDelivery');
+    console.log('  ✅ BullMQ workers started (Redis available)');
+  } catch (err: any) {
+    console.warn('  ℹ️  BullMQ workers disabled (Redis not available). DirectSender is active.');
+  }
 });
 
 export default app;

@@ -148,10 +148,28 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
   });
   const existingSet = new Set(existingLeads.map((l) => l.email.toLowerCase()));
 
-  // Column mapping (flexible)
+  // Column mapping — user-supplied or auto-detect
+  let userMapping: Record<string, string> | null = null;
+  try {
+    if (req.body.columnMapping) {
+      userMapping = JSON.parse(req.body.columnMapping);
+    }
+  } catch { }
+
   const mapField = (record: any, fields: string[]) => {
     for (const f of fields) {
       if (record[f] !== undefined && record[f] !== '') return record[f];
+    }
+    return null;
+  };
+
+  // If user provided mapping, use it to extract a field value
+  const mapUserField = (record: any, targetField: string): string | null => {
+    if (!userMapping) return null;
+    for (const [csvCol, target] of Object.entries(userMapping)) {
+      if (target === targetField && record[csvCol] !== undefined && record[csvCol] !== '') {
+        return record[csvCol];
+      }
     }
     return null;
   };
@@ -161,7 +179,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 
   for (const record of records) {
     const email = (
-      mapField(record, ['email', 'Email', 'EMAIL', 'e-mail', 'E-Mail', 'email_address']) || ''
+      mapUserField(record, 'email') || mapField(record, ['email', 'Email', 'EMAIL', 'e-mail', 'E-Mail', 'email_address']) || ''
     ).toLowerCase().trim();
 
     if (!email || !isValidEmail(email)) {
@@ -179,15 +197,15 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       continue;
     }
 
-    // Extract standard fields
-    const firstName = mapField(record, ['firstName', 'first_name', 'First Name', 'first', 'vorname', 'Vorname']);
-    const lastName = mapField(record, ['lastName', 'last_name', 'Last Name', 'last', 'nachname', 'Nachname']);
-    const company = mapField(record, ['company', 'Company', 'company_name', 'Firma', 'firma', 'Unternehmen']);
-    const jobTitle = mapField(record, ['jobTitle', 'job_title', 'Job Title', 'title', 'Title', 'Position', 'position']);
-    const phone = mapField(record, ['phone', 'Phone', 'phone_number', 'Telefon', 'telefon']);
-    const website = mapField(record, ['website', 'Website', 'url', 'URL', 'Webseite']);
-    const location = mapField(record, ['location', 'Location', 'city', 'City', 'Ort', 'ort', 'Standort']);
-    const linkedinUrl = mapField(record, ['linkedinUrl', 'linkedin', 'LinkedIn', 'linkedin_url']);
+    // Extract standard fields (user mapping first, then auto-detect fallback)
+    const firstName = mapUserField(record, 'firstName') || mapField(record, ['firstName', 'first_name', 'First Name', 'first', 'vorname', 'Vorname']);
+    const lastName = mapUserField(record, 'lastName') || mapField(record, ['lastName', 'last_name', 'Last Name', 'last', 'nachname', 'Nachname']);
+    const company = mapUserField(record, 'company') || mapField(record, ['company', 'Company', 'company_name', 'Firma', 'firma', 'Unternehmen']);
+    const jobTitle = mapUserField(record, 'jobTitle') || mapField(record, ['jobTitle', 'job_title', 'Job Title', 'title', 'Title', 'Position', 'position']);
+    const phone = mapUserField(record, 'phone') || mapField(record, ['phone', 'Phone', 'phone_number', 'Telefon', 'telefon']);
+    const website = mapUserField(record, 'website') || mapField(record, ['website', 'Website', 'url', 'URL', 'Webseite']);
+    const location = mapUserField(record, 'location') || mapField(record, ['location', 'Location', 'city', 'City', 'Ort', 'ort', 'Standort']);
+    const linkedinUrl = mapUserField(record, 'linkedinUrl') || mapField(record, ['linkedinUrl', 'linkedin', 'LinkedIn', 'linkedin_url']);
 
     // All remaining fields go to customVars
     const standardFields = new Set([
@@ -252,6 +270,51 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
     results,
     totalProcessed: records.length,
   });
+});
+
+// CSV Export
+router.get('/export', async (req: AuthRequest, res: Response) => {
+  const listId = req.query.listId as string;
+  const where: any = { workspaceId: req.workspaceId };
+  if (listId) where.listId = listId;
+
+  const leads = await prisma.lead.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const headers = ['email', 'firstName', 'lastName', 'company', 'jobTitle', 'phone', 'website', 'location', 'linkedinUrl', 'status'];
+
+  // Collect all custom var keys
+  const customKeys = new Set<string>();
+  leads.forEach(lead => {
+    if (lead.customVars && typeof lead.customVars === 'object') {
+      Object.keys(lead.customVars as Record<string, string>).forEach(k => customKeys.add(k));
+    }
+  });
+  const allHeaders = [...headers, ...Array.from(customKeys)];
+
+  // Build CSV
+  const escapeCsv = (v: string) => {
+    if (!v) return '';
+    if (v.includes(',') || v.includes('"') || v.includes('\n')) return `"${v.replace(/"/g, '""')}"`;
+    return v;
+  };
+
+  let csv = allHeaders.map(escapeCsv).join(',') + '\n';
+  for (const lead of leads) {
+    const row = headers.map(h => escapeCsv(String((lead as any)[h] || '')));
+    // Add custom vars
+    const vars = (lead.customVars || {}) as Record<string, string>;
+    for (const ck of customKeys) {
+      row.push(escapeCsv(vars[ck] || ''));
+    }
+    csv += row.join(',') + '\n';
+  }
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="leads_export_${Date.now()}.csv"`);
+  return res.send(csv);
 });
 
 // Get lead detail
